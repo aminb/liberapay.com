@@ -51,6 +51,7 @@ from liberapay.exceptions import (
     TooManyEmailVerifications,
     TooManyPasswordLogins,
     TooManyUsernameChanges,
+    TransferError,
     UserDoesntAcceptTips,
     UsernameAlreadyTaken,
     UsernameBeginsWithRestrictedCharacter,
@@ -541,6 +542,8 @@ class Participant(Model, MixinTeam):
         elif disbursement_strategy == 'downstream':
             # This in particular needs to come before clear_tips_giving.
             self.distribute_balance_as_final_gift()
+        elif disbursement_strategy == 'payin-refund':
+            self.refund_balances()
         else:
             raise self.UnknownDisbursementStrategy
 
@@ -552,6 +555,33 @@ class Participant(Model, MixinTeam):
             self.clear_subscriptions(cursor)
             self.final_check(cursor)
             self.update_status('closed', cursor)
+
+    def refund_balances(self):
+        from liberapay.billing.transactions import refund_payin
+        payins = website.db.all("""
+            SELECT e.*
+              FROM cash_bundles b
+              JOIN exchanges e ON e.id = b.origin
+              JOIN exchange_routes r ON r.id = e.route
+             WHERE b.owner = %s
+               AND e.timestamp > (now() - interval '365 days')
+               AND r.network IN ('mango-cc', 'mango-ba')
+               AND NOT EXISTS (
+                       SELECT e2.id
+                         FROM exchanges e2
+                        WHERE e2.participant = e.participant  -- indexed column
+                          AND e2.refund_ref = e.id
+                          AND e2.status = 'succeeded'
+                   )
+          ORDER BY e.amount DESC
+        """, (self.id,))
+        balances = self.get_balances()
+        for exchange in payins:
+            balance = balances[exchange.amount.currency]
+            amount = min(balance, exchange.amount)
+            status, e_refund = refund_payin(self.db, exchange, amount, self)
+            if status != 'succeeded':
+                raise TransferError(e_refund.note)
 
     class NoOneToGiveFinalGiftTo(Exception): pass
 

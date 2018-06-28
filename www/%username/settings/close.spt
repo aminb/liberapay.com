@@ -25,12 +25,30 @@ pending_payouts = website.db.one("""
       FROM exchanges
      WHERE participant = %s
        AND amount < 0
+       AND refund_ref IS NULL
        AND ( status = 'created' OR
              status = 'succeeded' AND timestamp > (current_timestamp - interval '24 hours')
            )
 """, (participant.id,))
 
 balances = participant.get_balances()
+
+refundable_balances = website.db.one("""
+    SELECT basket_sum(e.amount)
+      FROM cash_bundles b
+      JOIN exchanges e ON e.id = b.origin
+      JOIN exchange_routes r ON r.id = e.route
+     WHERE b.owner = %s
+       AND b.wallet_id = e.wallet_id
+       AND r.network = 'mango-cc'
+       AND NOT EXISTS (
+               SELECT e2.id
+                 FROM exchanges e2
+                WHERE e2.participant = e.participant  -- indexed column
+                  AND e2.refund_ref = e.id
+                  AND e2.status = 'succeeded'
+           )
+""", (participant.id,))
 
 title = _("Close Account")
 subhead = participant.username
@@ -70,15 +88,22 @@ subhead = participant.username
                 balances) }}</p>
         <div class="paragraph">
             <label>
-                <input type="radio" name="disburse_to" value="payout" />
-                {{ _("Withdraw it") }}
-            </label><br>
-            <label>
                 <input type="radio" name="disburse_to" value="downstream"
                        {{ 'disabled' if not participant.giving else '' }} />
                 {{ _("Give it to the {0}people I donate to{1}",
                      '<a href="%s">'|safe % participant.path('giving'), '</a>'|safe) }}
+            </label><br>
+            % if refundable_balances >= balances
+            <label>
+                <input type="radio" name="disburse_to" value="payin-refund" />
+                {{ _("Refund it to my card") }}
+            </label><br>
+            % else
+            <label>
+                <input type="radio" name="disburse_to" value="payout" />
+                {{ _("Withdraw it to my bank account") }}
             </label>
+            % endif
         </div>
         <p>{{ _(
             "If neither option works for you, please contact support@liberapay.com."
